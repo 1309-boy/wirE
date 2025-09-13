@@ -29,7 +29,6 @@
     background:#181818;
   }
 
-  /* 캔버스: CSS border 제거 → 벽은 JS로 직접 그림 */
   #gameCanvas{
     display:block;
     background:var(--arena);
@@ -40,7 +39,6 @@
     font-weight:700; font-size:20px; text-shadow:0 2px 4px rgba(0,0,0,.4);
   }
 
-  /* 하단 중앙 D패드 */
   #joystickContainer{
     height:260px;
     display:grid;
@@ -72,70 +70,119 @@
       <div class="joyEmpty"></div>            <div id="btnDown"  class="joyBtn">▼</div> <div class="joyEmpty"></div>
     </div>
   </div>
+
 <script>
 (function(){
-  const canvas = document.getElementById('gameCanvas');
-  const ctx = canvas.getContext('2d');
-  const scoreEl = document.getElementById('scoreDisplay');
+  const canvas=document.getElementById('gameCanvas');
+  const ctx=canvas.getContext('2d');
+  const scoreEl=document.getElementById('scoreDisplay');
+  const playArea=document.getElementById('playArea');
+  const joy=document.getElementById('joystickContainer');
+  const isTouch=('ontouchstart' in window)||(navigator.maxTouchPoints>0);
+  if(!isTouch) joy.style.display='none';
 
-  const state = {
-    wirePoints: [],
-    wireLine: null,
-    score: 0
+  const state={
+    player:{x:0,y:0,width:24,height:36,speed:2.2,dir:{up:false,down:false,left:false,right:false}},
+    balls:[],
+    score:0,
+    wirePoints:[],
+    wireLine:null,
+    lastSpawn:0,spawnInterval:1500,bounceDecay:0.9
   };
 
-  // --- 클릭 처리 ---
-  canvas.addEventListener('mousedown', e=>{
-    const rect = canvas.getBoundingClientRect();
-    // client 좌표 → 캔버스 좌표 변환 (정수 반올림)
-    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const y = (e.clientY - rect.top)  * (canvas.height / rect.height);
-    onWall(x,y);
+  const WALL_THICK=14, HALF_WALL=WALL_THICK/2;
+
+  function resizeCanvas(){
+    const cw=playArea.clientWidth,ch=playArea.clientHeight,aspect=4/3;
+    let w=cw,h=cw/aspect; if(h>ch){h=ch;w=h*aspect;}
+    canvas.width=w; canvas.height=h;
+    state.player.x=canvas.width/2; state.player.y=canvas.height/2;
+  }
+  window.addEventListener('resize',resizeCanvas); resizeCanvas();
+
+  const redSprite=['00100','01110','11111','01110','10101','10101','10101'];
+  function drawPlayer(x,y){
+    const s=6; const sx=x-(redSprite[0].length*s)/2, sy=y-(redSprite.length*s)/2;
+    ctx.fillStyle='#f44';
+    for(let r=0;r<redSprite.length;r++)for(let c=0;c<redSprite[r].length;c++)
+      if(redSprite[r][c]==='1') ctx.fillRect(sx+c*s,sy+r*s,s,s);
+  }
+
+  // 입력 처리
+  document.addEventListener('keydown',e=>{
+    if(e.key==='w')state.player.dir.up=true;
+    if(e.key==='s')state.player.dir.down=true;
+    if(e.key==='a')state.player.dir.left=true;
+    if(e.key==='d')state.player.dir.right=true;
+  });
+  document.addEventListener('keyup',e=>{
+    if(e.key==='w')state.player.dir.up=false;
+    if(e.key==='s')state.player.dir.down=false;
+    if(e.key==='a')state.player.dir.left=false;
+    if(e.key==='d')state.player.dir.right=false;
   });
 
+  if(isTouch){
+    const $=id=>document.getElementById(id);
+    const map={up:$('btnUp'),down:$('btnDown'),left:$('btnLeft'),right:$('btnRight')};
+    for(const k in map){
+      map[k].addEventListener('touchstart',ev=>{ev.preventDefault();state.player.dir[k]=true;});
+      map[k].addEventListener('touchend',ev=>{ev.preventDefault();state.player.dir[k]=false;});
+    }
+  }
+
+  // --- 와이어 처리 ---
+  canvas.addEventListener('mousedown', e=>{
+    const rect=canvas.getBoundingClientRect();
+    const x=(e.clientX-rect.left)*(canvas.width/rect.width);
+    const y=(e.clientY-rect.top)*(canvas.height/rect.height);
+    onWall(x,y);
+  });
   canvas.addEventListener('touchstart', e=>{
     if(e.touches.length){
-      const rect = canvas.getBoundingClientRect();
-      const t = e.touches[0];
-      const x = (t.clientX - rect.left) * (canvas.width / rect.width);
-      const y = (t.clientY - rect.top)  * (canvas.height / rect.height);
+      const rect=canvas.getBoundingClientRect();
+      const t=e.touches[0];
+      const x=(t.clientX-rect.left)*(canvas.width/rect.width);
+      const y=(t.clientY-rect.top)*(canvas.height/rect.height);
       onWall(x,y);
     }
   });
-
   function onWall(x,y){
-    // 벽 두께/클릭 허용 범위 크게 (30%로 테스트)
-    const marginX = canvas.width * 0.3;
-    const marginY = canvas.height * 0.3;
-
-    let wx=x, wy=y, ok=false;
-    if(x <= marginX){ wx=0; ok=true; }
-    else if(x >= canvas.width - marginX){ wx=canvas.width; ok=true; }
-    else if(y <= marginY){ wy=0; ok=true; }
-    else if(y >= canvas.height - marginY){ wy=canvas.height; ok=true; }
-
+    const marginX=canvas.width*0.3, marginY=canvas.height*0.3;
+    let wx=x,wy=y,ok=false;
+    if(x<=marginX){wx=0;ok=true;}
+    else if(x>=canvas.width-marginX){wx=canvas.width;ok=true;}
+    else if(y<=marginY){wy=0;ok=true;}
+    else if(y>=canvas.height-marginY){wy=canvas.height;ok=true;}
     if(!ok) return;
 
     state.wirePoints.push({x:wx,y:wy});
     if(state.wirePoints.length>=2){
       const p1=state.wirePoints[0], p2=state.wirePoints[1];
-      state.wireLine = {p1,p2};
+      state.wireLine={p1,p2};
       state.wirePoints.length=0;
-      console.log("와이어 생성:", state.wireLine); // 디버그 로그
+      console.log("와이어 생성:",state.wireLine);
     }
   }
 
-  // --- 그리기 테스트 ---
+  // --- 그리기 ---
+  function drawWalls(){
+    ctx.save(); ctx.strokeStyle='#555'; ctx.lineWidth=WALL_THICK;
+    ctx.strokeRect(HALF_WALL,HALF_WALL,canvas.width-WALL_THICK,canvas.height-WALL_THICK);
+    ctx.restore();
+  }
   function draw(){
     ctx.clearRect(0,0,canvas.width,canvas.height);
-    ctx.fillStyle="#222"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle='#222'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    drawWalls();
     if(state.wireLine){
-      ctx.strokeStyle="cyan"; ctx.lineWidth=4;
+      ctx.strokeStyle='cyan'; ctx.lineWidth=4;
       ctx.beginPath();
-      ctx.moveTo(state.wireLine.p1.x, state.wireLine.p1.y);
-      ctx.lineTo(state.wireLine.p2.x, state.wireLine.p2.y);
+      ctx.moveTo(state.wireLine.p1.x,state.wireLine.p1.y);
+      ctx.lineTo(state.wireLine.p2.x,state.wireLine.p2.y);
       ctx.stroke();
     }
+    drawPlayer(state.player.x,state.player.y);
     requestAnimationFrame(draw);
   }
   draw();
