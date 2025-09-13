@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Wire Defense Game</title>
+<style>
+  :root{
+    --wall: #555;   /* 벽 색 */
+    --arena:#222;   /* 경기장 내부 */
+    --page: #101010;
+  }
+  html,body{
+    margin:0; height:100%;
+    background:var(--page); color:#fff;
+    font-family:system-ui, sans-serif;
+    user-select:none; -webkit-user-select:none; overflow:hidden;
+  }
+
+  #app{
+    height:100dvh;
+    padding-bottom:env(safe-area-inset-bottom,0);
+    display:flex; flex-direction:column;
+  }
+
+  #playArea{
+    position:relative; flex:1;
+    display:flex; align-items:center; justify-content:center;
+    background:#181818;
+  }
+
+  /* 캔버스: CSS border 제거 → 벽은 JS로 직접 그림 */
+  #gameCanvas{
+    display:block;
+    background:var(--arena);
+  }
+
+  #scoreDisplay{
+    position:absolute; left:12px; top:12px; z-index:2;
+    font-weight:700; font-size:20px; text-shadow:0 2px 4px rgba(0,0,0,.4);
+  }
+
+  /* 하단 중앙 D패드 */
+  #joystickContainer{
+    height:260px;
+    display:grid;
+    grid-template-columns:90px 90px 90px;
+    grid-template-rows:90px 90px 90px;
+    align-self:center;
+    margin-bottom:calc(env(safe-area-inset-bottom,0) + 8px);
+    touch-action:none;
+  }
+  .joyBtn,.joyEmpty{ width:90px; height:90px; }
+  .joyBtn{
+    border-radius:18px; background:#333; border:1px solid #666; color:#eee;
+    display:flex; justify-content:center; align-items:center; font-size:30px;
+  }
+  .joyBtn:active{ background:#555; }
+  .joyEmpty{ background:transparent; }
+</style>
+</head>
+<body>
+  <div id="app">
+    <div id="playArea">
+      <canvas id="gameCanvas" width="800" height="600"></canvas>
+      <div id="scoreDisplay">점수: 0</div>
+    </div>
+
+    <div id="joystickContainer">
+      <div class="joyEmpty"></div>            <div id="btnUp"    class="joyBtn">▲</div> <div class="joyEmpty"></div>
+      <div id="btnLeft" class="joyBtn">◀</div><div class="joyEmpty"></div>              <div id="btnRight" class="joyBtn">▶</div>
+      <div class="joyEmpty"></div>            <div id="btnDown"  class="joyBtn">▼</div> <div class="joyEmpty"></div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const canvas=document.getElementById('gameCanvas');
+  const ctx=canvas.getContext('2d');
+  const scoreEl=document.getElementById('scoreDisplay');
+  const playArea=document.getElementById('playArea');
+  const joy=document.getElementById('joystickContainer');
+  const isTouch=('ontouchstart' in window)||(navigator.maxTouchPoints>0);
+  if(!isTouch) joy.style.display='none';
+
+  const state={
+    player:{x:0,y:0,width:24,height:36,speed:2.2,dir:{up:false,down:false,left:false,right:false}},
+    balls:[],
+    score:0,
+    wirePoints:[],
+    wireLine:null,
+    lastSpawn:0,spawnInterval:1500,bounceDecay:0.9
+  };
+
+  const WALL_THICK=14, HALF_WALL=WALL_THICK/2;
+
+  function resizeCanvas(){
+    const cw=playArea.clientWidth,ch=playArea.clientHeight,aspect=4/3;
+    let w=cw,h=cw/aspect; if(h>ch){h=ch;w=h*aspect;}
+    canvas.width=w; canvas.height=h;
+    state.player.x=Math.min(Math.max(state.player.x,state.player.width/2),w-state.player.width/2);
+    state.player.y=Math.min(Math.max(state.player.y,state.player.height/2),h-state.player.height/2);
+  }
+  window.addEventListener('resize',resizeCanvas); resizeCanvas();
+  state.player.x=canvas.width/2; state.player.y=canvas.height/2;
+
+  const redSprite=['00100','01110','11111','01110','10101','10101','10101'];
+  function drawPlayer(x,y){
+    const s=6; const sx=x-(redSprite[0].length*s)/2, sy=y-(redSprite.length*s)/2;
+    ctx.fillStyle='#f44';
+    for(let r=0;r<redSprite.length;r++)for(let c=0;c<redSprite[r].length;c++)
+      if(redSprite[r][c]==='1') ctx.fillRect(sx+c*s,sy+r*s,s,s);
+  }
+
+  document.addEventListener('keydown',e=>{
+    if(e.key==='w')state.player.dir.up=true;
+    if(e.key==='s')state.player.dir.down=true;
+    if(e.key==='a')state.player.dir.left=true;
+    if(e.key==='d')state.player.dir.right=true;
+  });
+  document.addEventListener('keyup',e=>{
+    if(e.key==='w')state.player.dir.up=false;
+    if(e.key==='s')state.player.dir.down=false;
+    if(e.key==='a')state.player.dir.left=false;
+    if(e.key==='d')state.player.dir.right=false;
+  });
+
+  if(isTouch){
+    const $=id=>document.getElementById(id);
+    const map={up:$('btnUp'),down:$('btnDown'),left:$('btnLeft'),right:$('btnRight')};
+    for(const k in map){
+      map[k].addEventListener('touchstart',ev=>{ev.preventDefault();state.player.dir[k]=true;});
+      map[k].addEventListener('touchend',ev=>{ev.preventDefault();state.player.dir[k]=false;});
+      map[k].addEventListener('touchcancel',ev=>{ev.preventDefault();state.player.dir[k]=false;});
+    }
+  }
+
+  function spawnBall(){
+    const side=(Math.random()*4)|0; let x,y;
+    if(side===0){x=Math.random()*canvas.width;y=0;}
+    else if(side===1){x=canvas.width;y=Math.random()*canvas.height;}
+    else if(side===2){x=Math.random()*canvas.width;y=canvas.height;}
+    else {x=0;y=Math.random()*canvas.height;}
+    const dx=state.player.x-x,dy=state.player.y-y,len=Math.hypot(dx,dy)||1;
+    const v0=state.player.speed*0.9; const ux=dx/len,uy=dy/len;
+    const hue=(Math.random()*360)|0; const r=10+Math.random()*6;
+    state.balls.push({x,y,vx:ux*v0,vy:uy*v0,r,color:`hsl(${hue},70%,55%)`});
+  }
+
+  function distPointSeg(px,py,x1,y1,x2,y2){
+    const A=px-x1,B=py-y1,C=x2-x1,D=y2-y1,dot=A*C+B*D,len=C*C+D*D;
+    let t=len?dot/len:0; if(t<0)t=0; else if(t>1)t=1;
+    const xx=x1+t*C,yy=y1+t*D; return Math.hypot(px-xx,py-yy);
+  }
+
+  function update(ts){
+    if(ts-state.lastSpawn>state.spawnInterval){
+      spawnBall(); state.lastSpawn=ts; state.spawnInterval=1000+Math.random()*1500;
+    }
+    let mx=0,my=0; if(state.player.dir.up)my--; if(state.player.dir.down)my++;
+    if(state.player.dir.left)mx--; if(state.player.dir.right)mx++;
+    if(mx||my){const l=Math.hypot(mx,my);mx/=l;my/=l; state.player.x+=mx*state.player.speed; state.player.y+=my*state.player.speed;}
+    state.player.x=Math.min(Math.max(state.player.x,state.player.width/2),canvas.width-state.player.width/2);
+    state.player.y=Math.min(Math.max(state.player.y,state.player.height/2),canvas.height-state.player.height/2);
+
+    for(const b of state.balls){
+      b.x+=b.vx; b.y+=b.vy;
+      const dec=state.bounceDecay,minV=0.4;
+      if(b.x-b.r<=0&&b.vx<0){b.x=b.r;b.vx=-b.vx*dec;b.vy*=dec;}
+      if(b.x+b.r>=canvas.width&&b.vx>0){b.x=canvas.width-b.r;b.vx=-b.vx*dec;b.vy*=dec;}
+      if(b.y-b.r<=0&&b.vy<0){b.y=b.r;b.vy=-b.vy*dec;b.vx*=dec;}
+      if(b.y+b.r>=canvas.height&&b.vy>0){b.y=canvas.height-b.r;b.vy=-b.vy*dec;b.vx*=dec;}
+      b.vx*=0.999; b.vy*=0.999;
+      if(Math.abs(b.vx)+Math.abs(b.vy)<minV){const s=minV/(Math.abs(b.vx)+Math.abs(b.vy)||1);b.vx*=s;b.vy*=s;}
+    }
+
+    if(state.wireLine){
+      const {p1,p2}=state.wireLine;
+      for(let i=state.balls.length-1;i>=0;i--){
+        const b=state.balls[i];
+        if(distPointSeg(b.x,b.y,p1.x,p1.y,p2.x,p2.y)<=b.r){
+          state.balls.splice(i,1); state.score++; scoreEl.textContent=`점수: ${state.score}`;
+          state.wireLine=null; break;
+        }
+      }
+    }
+    draw(); requestAnimationFrame(update);
+  }
+
+  function drawWalls(){
+    ctx.save(); ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--wall')||'#555';
+    ctx.lineWidth=WALL_THICK;
+    ctx.strokeRect(HALF_WALL,HALF_WALL,canvas.width-WALL_THICK,canvas.height-WALL_THICK);
+    ctx.restore();
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--arena')||'#222';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    drawWalls();
+    if(state.wireLine){ctx.strokeStyle='#88f';ctx.lineWidth=4;ctx.beginPath();
+      ctx.moveTo(state.wireLine.p1.x,state.wireLine.p1.y); ctx.lineTo(state.wireLine.p2.x,state.wireLine.p2.y); ctx.stroke();}
+    for(const b of state.balls){ctx.beginPath();ctx.fillStyle=b.color;ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.fill();}
+    drawPlayer(state.player.x,state.player.y);
+  }
+
+  scoreEl.textContent=`점수: ${state.score}`;
+  requestAnimationFrame(update);
+})();
+</script>
+</body>
+</html>
